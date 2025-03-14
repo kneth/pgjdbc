@@ -22,7 +22,6 @@ import org.postgresql.core.QueryExecutor;
 import org.postgresql.core.ReplicationProtocol;
 import org.postgresql.core.ResultHandlerBase;
 import org.postgresql.core.ServerVersion;
-import org.postgresql.core.SqlCommand;
 import org.postgresql.core.TransactionState;
 import org.postgresql.core.TypeInfo;
 import org.postgresql.core.Utils;
@@ -74,6 +73,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLPermission;
 import java.sql.SQLWarning;
 import java.sql.SQLXML;
@@ -170,6 +170,8 @@ public class PgConnection implements BaseConnection {
 
   private final TypeInfo typeCache;
 
+  private boolean strict = false;
+
   private boolean disableColumnSanitiser;
 
   // Default statement prepare threshold.
@@ -260,6 +262,10 @@ public class PgConnection implements BaseConnection {
 
     this.creatingURL = url;
 
+    if (PGProperty.STRICT.getBoolean(info)) {
+      strict = true;
+    }
+
     this.readOnlyBehavior = getReadOnlyBehavior(PGProperty.READ_ONLY_MODE.getOrDefault(info));
 
     setDefaultFetchSize(PGProperty.DEFAULT_ROW_FETCH_SIZE.getInt(info));
@@ -282,6 +288,10 @@ public class PgConnection implements BaseConnection {
 
     // Set read-only early if requested
     if (PGProperty.READ_ONLY.getBoolean(info)) {
+      if (strict) {
+        throw new PSQLException(GT.tr("Read-only connections are not supported."),
+            PSQLState.CONNECTION_UNABLE_TO_CONNECT);
+      }
       setReadOnly(true);
     }
 
@@ -908,6 +918,9 @@ public class PgConnection implements BaseConnection {
   @Override
   public void setReadOnly(boolean readOnly) throws SQLException {
     checkClosed();
+    if (readOnly) {
+      throwUnsupportedIfStrictMode("Setting transaction isolation READ ONLY not supported.");
+    }
     if (queryExecutor.getTransactionState() != TransactionState.IDLE) {
       throw new PSQLException(
           GT.tr("Cannot change transaction read-only property in the middle of a transaction."),
@@ -920,6 +933,10 @@ public class PgConnection implements BaseConnection {
 
     this.readOnly = readOnly;
     LOGGER.log(Level.FINE, "  setReadOnly = {0}", readOnly);
+  }
+
+  public boolean isStrict() throws SQLException {
+    return strict;
   }
 
   @Override
@@ -939,6 +956,9 @@ public class PgConnection implements BaseConnection {
 
     if (this.autoCommit == autoCommit) {
       return;
+    } else if (!autoCommit && strict) {
+      throw new SQLFeatureNotSupportedException("The auto-commit mode cannot be disabled in strict mode. "
+              + "The Crate JDBC driver does not support manual commit.");
     }
 
     if (!this.autoCommit) {
@@ -994,13 +1014,9 @@ public class PgConnection implements BaseConnection {
   public void commit() throws SQLException {
     checkClosed();
 
-    if (autoCommit) {
-      throw new PSQLException(GT.tr("Cannot commit when autoCommit is enabled."),
-          PSQLState.NO_ACTIVE_SQL_TRANSACTION);
-    }
-
-    if (queryExecutor.getTransactionState() != TransactionState.IDLE) {
-      executeTransactionCommand(commitQuery);
+    if (autoCommit && strict) {
+      throw new SQLFeatureNotSupportedException("The commit operation is not allowed. "
+            + "The Crate JDBC driver does not support manual commit.");
     }
   }
 
@@ -1014,18 +1030,7 @@ public class PgConnection implements BaseConnection {
   @Override
   public void rollback() throws SQLException {
     checkClosed();
-
-    if (autoCommit) {
-      throw new PSQLException(GT.tr("Cannot rollback when autoCommit is enabled."),
-          PSQLState.NO_ACTIVE_SQL_TRANSACTION);
-    }
-
-    if (queryExecutor.getTransactionState() != TransactionState.IDLE) {
-      executeTransactionCommand(rollbackQuery);
-    } else {
-      // just log for debugging
-      LOGGER.log(Level.FINE, "Rollback requested but no transaction in progress");
-    }
+    throwUnsupportedIfStrictMode("Rollback is not supported.");
   }
 
   @Override
@@ -1068,6 +1073,7 @@ public class PgConnection implements BaseConnection {
 
   @Override
   public void setTransactionIsolation(int level) throws SQLException {
+    throwUnsupportedIfStrictMode("Setting transaction isolation not supported.");
     checkClosed();
 
     if (queryExecutor.getTransactionState() != TransactionState.IDLE) {
@@ -1788,23 +1794,8 @@ public class PgConnection implements BaseConnection {
   @Override
   public Savepoint setSavepoint() throws SQLException {
     checkClosed();
-
-    String pgName;
-    if (getAutoCommit()) {
-      throw new PSQLException(GT.tr("Cannot establish a savepoint in auto-commit mode."),
-          PSQLState.NO_ACTIVE_SQL_TRANSACTION);
-    }
-
-    PSQLSavepoint savepoint = new PSQLSavepoint(savepointId++);
-    pgName = savepoint.getPGName();
-
-    // Note we can't use execSQLUpdate because we don't want
-    // to suppress BEGIN.
-    Statement stmt = createStatement();
-    stmt.executeUpdate("SAVEPOINT " + pgName);
-    stmt.close();
-
-    return savepoint;
+    throwUnsupportedIfStrictMode("Savepoint is not supported.");
+    return null;
   }
 
   @Override
@@ -1830,18 +1821,13 @@ public class PgConnection implements BaseConnection {
   @Override
   public void rollback(Savepoint savepoint) throws SQLException {
     checkClosed();
-
-    PSQLSavepoint pgSavepoint = (PSQLSavepoint) savepoint;
-    execSQLUpdate("ROLLBACK TO SAVEPOINT " + pgSavepoint.getPGName());
+    throwUnsupportedIfStrictMode("Rollback is not supported.");
   }
 
   @Override
   public void releaseSavepoint(Savepoint savepoint) throws SQLException {
     checkClosed();
-
-    PSQLSavepoint pgSavepoint = (PSQLSavepoint) savepoint;
-    execSQLUpdate("RELEASE SAVEPOINT " + pgSavepoint.getPGName());
-    pgSavepoint.invalidate();
+    throwUnsupportedIfStrictMode("Savepoint is not supported.");
   }
 
   @Override
@@ -1862,49 +1848,31 @@ public class PgConnection implements BaseConnection {
   public CallableStatement prepareCall(String sql, int resultSetType, int resultSetConcurrency)
       throws SQLException {
     checkClosed();
-    return prepareCall(sql, resultSetType, resultSetConcurrency, getHoldability());
+    throw new SQLFeatureNotSupportedException("Connection: prepareCall(String sql, int resultSetType, int resultSetConcurrency, int resultSetHoldability) not supported");
   }
 
   @Override
   public PreparedStatement prepareStatement(String sql, int autoGeneratedKeys) throws SQLException {
-    if (autoGeneratedKeys != Statement.RETURN_GENERATED_KEYS) {
-      return prepareStatement(sql);
-    }
-
-    return prepareStatement(sql, (String[]) null);
+    checkClosed();
+    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int autoGeneratedKeys) not supported");
   }
 
   @Override
   public PreparedStatement prepareStatement(String sql, int @Nullable [] columnIndexes) throws SQLException {
-    if (columnIndexes != null && columnIndexes.length == 0) {
-      return prepareStatement(sql);
-    }
-
     checkClosed();
-    throw new PSQLException(GT.tr("Returning autogenerated keys is not supported."),
-        PSQLState.NOT_IMPLEMENTED);
+    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int autoGeneratedKeys) not supported");
   }
 
   @Override
   public PreparedStatement prepareStatement(String sql, String @Nullable[] columnNames) throws SQLException {
-    if (columnNames != null && columnNames.length == 0) {
-      return prepareStatement(sql);
-    }
+    checkClosed();
+    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int autoGeneratedKeys) not supported");
+  }
 
-    CachedQuery cachedQuery = borrowReturningQuery(sql, columnNames);
-    PgPreparedStatement ps =
-        new PgPreparedStatement(this, cachedQuery,
-            ResultSet.TYPE_FORWARD_ONLY,
-            ResultSet.CONCUR_READ_ONLY,
-            getHoldability());
-    Query query = cachedQuery.query;
-    SqlCommand sqlCommand = query.getSqlCommand();
-    if (sqlCommand != null) {
-      ps.wantsGeneratedKeysAlways = sqlCommand.isReturningKeywordPresent();
-    } else {
-      // If composite query is given, just ignore "generated keys" arguments
+  private void throwUnsupportedIfStrictMode(String message) throws SQLFeatureNotSupportedException {
+    if (strict) {
+      throw new SQLFeatureNotSupportedException(message);
     }
-    return ps;
   }
 
   @Override
