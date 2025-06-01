@@ -1254,17 +1254,8 @@ public class PgStatement implements Statement, BaseStatement {
 
   @Override
   public int executeUpdate(String sql, String @Nullable [] columnNames) throws SQLException {
-    try (ResourceLock ignore = lock.obtain()) {
-      if (columnNames != null && columnNames.length == 0) {
-        return executeUpdate(sql);
-      }
-
-      wantsGeneratedKeysOnce = true;
-      if (!executeCachedSql(sql, 0, columnNames)) {
-        // no resultset returned. What's a pity!
-      }
-      return getUpdateCount();
-    }
+    checkClosed();
+    throw new SQLFeatureNotSupportedException("Statement: executeUpdate(String sql, String[] columnNames) not supported");
   }
 
   @Override
