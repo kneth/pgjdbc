@@ -1708,7 +1708,7 @@ public class PgDatabaseMetaData implements DatabaseMetaData {
   public ResultSet getBestRowIdentifier(
       @Nullable String catalog, @Nullable String schema, String table,
       int scope, boolean nullable) throws SQLException {
-  return emptyResult(
+    return emptyResult(
           col("SCOPE"),
           col("COLUMN_NAME"),
           col("DATA_TYPE"),
@@ -2211,8 +2211,8 @@ public class PgDatabaseMetaData implements DatabaseMetaData {
     row11.set(17, b10);
     v.add(row11);
     String[] arrayTypes = new String[]{"string_array", "ip_array", "long_array",
-    "integer_array", "short_array", "boolean_array", "byte_array",
-    "float_array", "double_array", "object_array"};
+      "integer_array", "short_array", "boolean_array", "byte_array",
+      "float_array", "double_array", "object_array"};
     for (int i = 11; i < 11 + arrayTypes.length; i++) {
       Tuple row = new Tuple(f.length);
       row.set(0, connection.encodeString(arrayTypes[i - 11]));
@@ -2239,7 +2239,6 @@ public class PgDatabaseMetaData implements DatabaseMetaData {
     return ((BaseStatement) createMetaDataStatement()).createDriverResultSet(f, v);
   }
 
-
   @Override
   public ResultSet getIndexInfo(
       @Nullable String catalog, @Nullable String schema, String tableName,
@@ -2258,7 +2257,7 @@ public class PgDatabaseMetaData implements DatabaseMetaData {
             col("CARDINALITY"),
             col("PAGES"),
             col("FILTER_CONDITION"));
-    }
+  }
 
   // ** JDBC 2 Extensions **
 

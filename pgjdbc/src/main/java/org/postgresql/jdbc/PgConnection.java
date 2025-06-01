@@ -52,6 +52,8 @@ import org.postgresql.xml.DefaultPGXmlFactoryFactory;
 import org.postgresql.xml.LegacyInsecurePGXmlFactoryFactory;
 import org.postgresql.xml.PGXmlFactoryFactory;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.checker.nullness.qual.PolyNull;
 import org.checkerframework.dataflow.qual.Pure;
@@ -80,6 +82,7 @@ import java.sql.SQLXML;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Struct;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Arrays;
 import java.util.Collections;
@@ -506,6 +509,36 @@ public class PgConnection implements BaseConnection {
   }
 
   private final TimestampUtils timestampUtils;
+
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static void appendArray(StringBuilder sb, Object elements, char delim) {
+    sb.append('{');
+
+    int nElements = java.lang.reflect.Array.getLength(elements);
+    for (int i = 0; i < nElements; i++) {
+      if (i > 0) {
+        sb.append(delim);
+      }
+
+      Object o = java.lang.reflect.Array.get(elements, i);
+      if (o == null) {
+        sb.append("NULL");
+      } else if (o.getClass() == Timestamp.class) {
+        PgArray.escapeArrayElement(sb, String.valueOf(((Timestamp) o).getTime()));
+      } else if (o.getClass().isArray()) {
+        final PrimitiveArraySupport arraySupport = PrimitiveArraySupport.getArraySupport(o);
+        if (arraySupport != null) {
+          arraySupport.appendArray(sb, delim, o);
+        } else {
+          appendArray(sb, o, delim);
+        }
+      } else {
+        String s = o.toString();
+        PgArray.escapeArrayElement(sb, s);
+      }
+    }
+    sb.append('}');
+  }
 
   @Deprecated
   @Override
@@ -1485,9 +1518,9 @@ public class PgConnection implements BaseConnection {
     throw Driver.notImplemented(this.getClass(), "createStruct(String, Object[])");
   }
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
+  @SuppressWarnings({ "unchecked", "rawtypes" })
   @Override
-  public Array createArrayOf(String typeName, @Nullable Object elements) throws SQLException {
+  public Array createArrayOf(String typeName, Object elements) throws SQLException {
     checkClosed();
 
     final TypeInfo typeInfo = getTypeInfo();
@@ -1504,19 +1537,74 @@ public class PgConnection implements BaseConnection {
       return makeArray(oid, null);
     }
 
-    final ArrayEncoding.ArrayEncoder arraySupport = ArrayEncoding.getArrayEncoder(elements);
-    if (arraySupport.supportBinaryRepresentation(oid) && getPreferQueryMode() != PreferQueryMode.SIMPLE) {
-      return new PgArray(this, oid, arraySupport.toBinaryRepresentation(this, elements, oid));
+    final String arrayString;
+
+    final PrimitiveArraySupport arraySupport = PrimitiveArraySupport.getArraySupport(elements);
+
+    if (arraySupport != null) {
+      // if the oid for the given type matches the default type, we might be
+      // able to go straight to binary representation
+      if (oid == arraySupport.getDefaultArrayTypeOid(typeInfo) && arraySupport.supportBinaryRepresentation()
+          && getPreferQueryMode() != PreferQueryMode.SIMPLE) {
+        return new PgArray(this, oid, arraySupport.toBinaryRepresentation(this, elements));
+      }
+      arrayString = arraySupport.toArrayString(delim, elements);
+    } else {
+      final Class<?> clazz = elements.getClass();
+      if (!clazz.isArray()) {
+        throw new PSQLException(GT.tr("Invalid elements {0}", elements), PSQLState.INVALID_PARAMETER_TYPE);
+      }
+      StringBuilder sb = new StringBuilder();
+      appendArray(sb, elements, delim);
+      arrayString = sb.toString();
     }
 
-    final String arrayString = arraySupport.toArrayString(delim, elements);
     return makeArray(oid, arrayString);
   }
 
   @Override
   public Array createArrayOf(String typeName, @Nullable Object @Nullable [] elements)
       throws SQLException {
-    return createArrayOf(typeName, (Object) elements);
+    checkClosed();
+
+    int oid = getTypeInfo().getPGArrayType(typeName);
+
+    if (oid == Oid.UNSPECIFIED) {
+      throw new PSQLException(
+        GT.tr("Unable to find server array type for provided name {0}.", typeName),
+          PSQLState.INVALID_NAME);
+    }
+
+    if (oid == Oid.JSON_ARRAY) {
+      try {
+        PGobject[] pGObjectArray = new PGobject[elements.length];
+        for (int i = 0; i < elements.length; i++) {
+          pGObjectArray[i] = objectToPGObject(elements[i]);
+        }
+        elements = pGObjectArray;
+      } catch (JsonProcessingException e) {
+        throw new PSQLException(
+                GT.tr("Unable to convert object to JSON."),
+                PSQLState.UNDEFINED_OBJECT);
+      }
+    }
+
+    if (elements == null) {
+      return makeArray(oid, null);
+    }
+
+    char delim = getTypeInfo().getArrayDelimiter(oid);
+    StringBuilder sb = new StringBuilder();
+    appendArray(sb, elements, delim);
+
+    return makeArray(oid, sb.toString());
+  }
+
+  private PGobject objectToPGObject(Object object) throws JsonProcessingException, SQLException {
+    PGobject pgObject = new PGobject();
+    pgObject.setType("json");
+    pgObject.setValue(new ObjectMapper().writeValueAsString(object));
+    return pgObject;
   }
 
   @Override
@@ -1545,7 +1633,7 @@ public class PgConnection implements BaseConnection {
           }
         } else {
           try (Statement checkConnectionQuery = createStatement()) {
-            ((PgStatement)checkConnectionQuery).execute("", QueryExecutor.QUERY_EXECUTE_AS_SIMPLE);
+            ((PgStatement)checkConnectionQuery).executeUpdate("");
           }
         }
         return true;
@@ -1792,27 +1880,29 @@ public class PgConnection implements BaseConnection {
   }
 
   @Override
-  public Savepoint setSavepoint() throws SQLException {
+  public Savepoint setSavepoint(String name) throws SQLException {
     checkClosed();
     throwUnsupportedIfStrictMode("Savepoint is not supported.");
     return null;
   }
 
   @Override
-  public Savepoint setSavepoint(String name) throws SQLException {
+  public Savepoint setSavepoint() throws SQLException {
     checkClosed();
 
+    String pgName;
     if (getAutoCommit()) {
       throw new PSQLException(GT.tr("Cannot establish a savepoint in auto-commit mode."),
           PSQLState.NO_ACTIVE_SQL_TRANSACTION);
     }
 
-    PSQLSavepoint savepoint = new PSQLSavepoint(name);
+    PSQLSavepoint savepoint = new PSQLSavepoint(savepointId++);
+    pgName = savepoint.getPGName();
 
     // Note we can't use execSQLUpdate because we don't want
     // to suppress BEGIN.
     Statement stmt = createStatement();
-    stmt.executeUpdate("SAVEPOINT " + savepoint.getPGName());
+    stmt.executeUpdate("SAVEPOINT " + pgName);
     stmt.close();
 
     return savepoint;
@@ -1860,13 +1950,13 @@ public class PgConnection implements BaseConnection {
   @Override
   public PreparedStatement prepareStatement(String sql, int @Nullable [] columnIndexes) throws SQLException {
     checkClosed();
-    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int autoGeneratedKeys) not supported");
+    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int[] columnIndexes) not supported");
   }
 
   @Override
   public PreparedStatement prepareStatement(String sql, String @Nullable[] columnNames) throws SQLException {
     checkClosed();
-    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, int autoGeneratedKeys) not supported");
+    throw new SQLFeatureNotSupportedException("Connection: prepareStatement(String sql, String[] columnNames) not supported");
   }
 
   private void throwUnsupportedIfStrictMode(String message) throws SQLFeatureNotSupportedException {

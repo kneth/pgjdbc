@@ -29,7 +29,7 @@ import java.util.List;
  * @author Christopher Deckers (chrriis@gmail.com)
  */
 public class Parser {
-  private static char aMINUS_SIGN = '-';
+  private static char aMINUSSIGN = '-';
 
   /**
    * Parses JDBC query into PostgreSQL's native format. Several queries might be
@@ -861,7 +861,7 @@ public class Parser {
    * @return long value
    */
   static long parseSignedLong(String s, int beginIndex, int endIndex) {
-    boolean isNegative = s.charAt(beginIndex) == aMINUS_SIGN;
+    boolean isNegative = s.charAt(beginIndex) == aMINUSSIGN;
     if (isNegative) {
       beginIndex++;
     }
@@ -885,7 +885,7 @@ public class Parser {
       return false;
     }
     char c = s.charAt(pos);
-    return Character.isDigit(c) || c == aMINUS_SIGN;
+    return Character.isDigit(c) || c == aMINUSSIGN;
   }
 
   /**

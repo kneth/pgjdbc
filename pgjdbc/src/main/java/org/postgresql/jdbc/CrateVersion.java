@@ -7,7 +7,7 @@ package org.postgresql.jdbc;
 
 public class CrateVersion implements Comparable<String> {
 
-    private final String version;
+  private final String version;
 
   public CrateVersion(String version) {
     this.version = version;
